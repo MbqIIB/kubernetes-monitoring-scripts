@@ -1,0 +1,40 @@
+#!/usr/bin/python
+
+import argparse
+import sys
+import psutil
+
+# define and gather command line options
+parser = argparse.ArgumentParser(description='Check for running process for Monitoring.')
+
+parser.add_argument(
+    "-H",
+    "--host",
+    dest="host",
+    help="Which host to connect to?"
+)
+
+parser.add_argument(
+    "-p",
+    "--process",
+    dest="process",
+    help="Which process?"
+)
+
+# Parse Arguments
+options = parser.parse_args()
+
+# Set result flag to 1
+result = 1
+
+for pid in psutil.pids():
+    p = psutil.Process(pid)
+    # Determine if name of process equals input
+    if p.name() == options.process:
+        # Set result flag to 0 and exit for loop
+        result = 0
+        continue
+
+if result != 0:
+   sys.stdout.write('%s not running on %s\n' % (options.process, options.host))
+   sys.exit(2)

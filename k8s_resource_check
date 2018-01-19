@@ -1,0 +1,173 @@
+#!/usr/bin/python
+
+__author__ = 'Ben Pingilley'
+
+import argparse
+import sys
+import ssl
+import urllib
+from kubernetes import client, config
+from kubernetes.client.rest import ApiException
+
+# define and gather command line options
+parser = argparse.ArgumentParser(description='Interface Nagios with Kubernetes API for Monitoring.')
+
+# Load config file
+config.load_kube_config('/etc/kubernetes/admin.conf')
+
+parser.add_argument(
+    "-e",
+    "--errored",
+    dest="errored",
+    choices=[ 'deployments', 'ingress', 'pods', 'nodes' ],
+    help="List deployments, ingress resources, pods or nodes which are not running."
+)
+
+# Parse Arguments
+options = parser.parse_args()
+
+def ingress():
+    # Define empty string for ingress resources that are not running
+    erroredIngress = ""
+    
+    # Create an instance of the Core V1 API class
+    core_v1_api_instance = client.CoreV1Api()
+    
+    # Create an instance of the Extensions V1 API class
+    ext_v1_api_instance = client.ExtensionsV1beta1Api()
+    
+    # GET /apis/extensions/v1beta1/ingresses
+    all_ingress = ext_v1_api_instance.list_ingress_for_all_namespaces()
+    
+    # Iterate through each ingress
+    for ingress in all_ingress.items:
+        
+        # Assign to variables
+        namespace = ingress.metadata.namespace
+        name = ingress.spec.rules[0].http.paths[0].backend.service_name
+        
+        try:
+            # GET /api/v1/services
+            service = core_v1_api_instance.read_namespaced_service(name, namespace, pretty='true')
+        except:
+            service_code = 'Error reaching service %s.%s\n' % (namespace, name)
+            erroredIngress += service_code
+            continue
+        
+        # Create URL with port
+        url = 'http://%s:%s' % (service.spec.cluster_ip, service.spec.ports[0].port)
+
+        # Hard coded authserver until a health check is added
+        if 'authserver' in name:
+            url += '/.well-known/openid-configuration'
+
+        try:
+            context = ssl._create_unverified_context() # Ignore invalid certs.
+
+            # Get status of ingress service IP
+            code = urllib.urlopen(url, context=context).getcode()
+
+            # If url is not reachable, add url and code to string which will be returned at end
+            if code != 200 and code != 403: # 403 means it works but was forbidden
+                url_code = '%s\t%s\n' % (url, code)
+                erroredIngress += url_code
+        except IOError as e:
+            url_code = 'Error reaching %s: %s\n' % (url, e)
+            erroredIngress += url_code
+
+    # If URLs have been added, return list and exit 2 (Critical)
+    if len(erroredIngress) > 0:
+        sys.stdout.write(erroredIngress)
+        sys.exit(2)
+
+    # Else return OK
+    else:
+        sys.stdout.write('OK - All ingress resources returned 200 or 403\n')
+
+def pods():
+    # Define empty string for pods that are not running
+    erroredPods = ""
+
+    # Create an instance of the Core V1 API class
+    core_v1_api_instance = client.CoreV1Api()
+
+    # GET /api/v1/pods
+    all_pods = core_v1_api_instance.list_pod_for_all_namespaces(watch=False)
+
+    # Iterate through each pod
+    for pod in all_pods.items:
+        try:
+            # If pod is functioning, reason will not exist. Thus this variable assign will fail
+            erroredPod = "%s\t%s\t%s.%s\n" % (pod.status.phase, pod.status.container_statuses[0].state.waiting.reason, pod.metadata.namespace, pod.metadata.name)
+            erroredPods += erroredPod
+        except:
+            continue
+
+    # If pods have been added, return list and exit 2 (Critical)
+    if len(erroredPods) > 0:
+        sys.stdout.write(erroredPods)
+        sys.exit(2)
+
+    # Else return OK
+    else:
+        sys.stdout.write('OK - All pods are functioning without errors\n')
+
+def nodes():
+    # Define empty string for pods that are not running
+    erroredNodes = ""
+
+    # Create an instance of the Core V1 API class
+    core_v1_api_instance = client.CoreV1Api()
+
+    # GET /api/v1/nodes
+    all_nodes = core_v1_api_instance.list_node()
+
+    # Iterate through each node
+    for node in all_nodes.items:
+
+        # KubeletReady means node is functioning without errors
+        if node.status.conditions[3].reason != 'KubeletReady':
+            erroredNode = "%s\t%s\n" % (node.status.conditions[3].reason, node.metadata.name)
+            erroredNodes += erroredNode
+    
+    # If nodes have been added, return list and exit 2 (Critical)
+    if len(erroredNodes) > 0:
+        sys.stdout.write(erroredNodes)
+        sys.exit(2)
+
+    # Else return OK
+    else:
+        sys.stdout.write('OK - All nodes are functioning without errors\n')
+
+def deployments():
+    # Define empty string for deployments that are stalled
+    stalledDeployments = ""
+
+    # Create an instance of the Apps V1 Beta API class
+    apps_v1_api_instance = client.AppsV1beta1Api()
+
+    # GET /apis/apps/v1beta1/deployments
+    all_deployments = apps_v1_api_instance.list_deployment_for_all_namespaces()
+
+    # Iterate through each deployment
+    for deployment in all_deployments.items:
+
+        # Anything other than None is not a healthy deployment
+        if deployment.status.unavailable_replicas != None:
+            stalledDeployment = "%s.%s\tUnavailable Replicas: %s\\%s\n" % (deployment.metadata.namespace, deployment.metadata.name, deployment.status.unavailable_replicas, deployment.status.replicas)
+            stalledDeployments += stalledDeployment
+
+    # If deployments have been added, return list and exit 2 (Critical)
+    if len(stalledDeployments) > 0:
+        sys.stdout.write(stalledDeployments)
+        sys.exit(2)
+
+    # Else return OK
+    else:
+        sys.stdout.write('OK - All deployments are healthy\n')
+
+# This dictionary routes to the correct function based on user input of -e
+routes = {'deployments': deployments, 'ingress': ingress, 'pods': pods, 'nodes': nodes}
+
+# Call the routes dictionary
+routes[options.errored]()
